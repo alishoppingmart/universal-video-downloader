@@ -1,0 +1,60 @@
+name: Build Windows Portable Kit
+
+on:
+  push:
+    paths:
+      - "universal_downloader.py"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build the EXE
+        run: pyinstaller --onefile --windowed --name UniversalVideoDownloader universal_downloader.py
+
+      - name: Assemble portable kit (exe + yt-dlp + ffmpeg)
+        shell: pwsh
+        run: |
+          $kit = "UniversalVideoDownloader-Portable"
+          New-Item -ItemType Directory -Force -Path $kit | Out-Null
+          Copy-Item dist/UniversalVideoDownloader.exe $kit/
+
+          Write-Host "Downloading yt-dlp..."
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "$kit/yt-dlp.exe"
+
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
+          Get-ChildItem -Recurse ffmpeg_extracted -Include ffmpeg.exe,ffprobe.exe | ForEach-Object { Copy-Item $_.FullName "$kit/" }
+
+          $readme = @(
+            "AJ Tech - Universal Video Downloader (Portable)",
+            "================================================",
+            "",
+            "1. Keep all the files in this folder together.",
+            "2. (Optional) Put your facebook_cookies.txt in this folder - the app uses it automatically.",
+            "3. Double-click UniversalVideoDownloader.exe.",
+            "",
+            "To use on another PC: just copy this WHOLE folder over. No install, no rebuild."
+          )
+          $readme | Out-File -Encoding utf8 "$kit/READ ME FIRST.txt"
+
+      - name: Upload portable kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: UniversalVideoDownloader-Portable
+          path: UniversalVideoDownloader-Portable/**
