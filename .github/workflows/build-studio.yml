@@ -1,0 +1,56 @@
+name: Build AI Video Studio (Windows .exe)
+
+on:
+  push:
+    paths:
+      - "ai_video_studio/**"
+      - "studio_app.py"
+      - "requirements.txt"
+      - ".github/workflows/build-studio.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build the EXE
+        run: pyinstaller --onefile --windowed --name AIVideoStudio studio_app.py
+
+      - name: Assemble portable kit
+        shell: pwsh
+        run: |
+          $kit = "AIVideoStudio-Portable"
+          New-Item -ItemType Directory -Force -Path $kit | Out-Null
+          Copy-Item dist/AIVideoStudio.exe $kit/
+          Copy-Item docs/SETUP.md $kit/ -ErrorAction SilentlyContinue
+          @(
+            "AI Video Studio (Portable)",
+            "==========================",
+            "1. Double-click AIVideoStudio.exe.",
+            "2. First time: open SETUP.md and connect your accounts.",
+            "3. NOTE: Google Flow generation needs Chromium. If video",
+            "   generation says Playwright is missing, run once in a terminal:",
+            "      pip install playwright; playwright install chromium",
+            "",
+            "Your settings & logins are stored in your user folder, not here."
+          ) | Out-File -Encoding utf8 "$kit/READ ME FIRST.txt"
+
+      - name: Upload portable kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIVideoStudio-Portable
+          path: AIVideoStudio-Portable/**
