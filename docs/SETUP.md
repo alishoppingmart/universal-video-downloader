@@ -83,8 +83,37 @@ schedule even when your PC is off. (Generation still needs your PC — see §2.)
 
 ---
 
+---
+
+## 7. Mobile app (Android APK)
+
+The phone app is a **control panel**: it manages your topics/schedule/accounts
+and **triggers the cloud** to generate + publish (a phone can't run the Google
+Flow browser itself).
+
+**Get the APK:** open the GitHub **Actions** tab → run **"Build AI Video Studio
+(Android .apk)"** → download the `AIVideoStudio-APK` artifact → copy it to your
+phone and install (allow "install from unknown sources").
+
+**Using it:**
+1. Fill in topics, schedule, hashtags, platform toggles → **Save settings**.
+2. Under **Cloud (GitHub Actions)** enter:
+   - **Repo**: `alishoppingmart/universal-video-downloader`
+   - **Branch**: the branch that has `daily-publish.yml` (must be on **main** for
+     "Run now" to work — see note)
+   - **GitHub token**: a Personal Access Token with the **workflow** scope
+     (github.com → Settings → Developer settings → Tokens)
+3. **Run now in cloud** kicks off one publish job; **Check status** shows the
+   last run's result.
+
+> ⚠️ GitHub only lets you trigger a workflow that exists on the **default
+> branch**. So merge `daily-publish.yml` into `main` before using "Run now".
+
+---
+
 ## Roadmap / not done yet
-- Mobile (Android APK) control app.
+- iPhone (iOS) app — Buildozer is Android-only; iOS needs a Mac/Xcode build.
+- On-device direct posting from the phone (currently it routes through the cloud).
 - Smarter AI scripts/voiceover and a 100%-free generation fallback.
 - Auto-refresh of TikTok access tokens.
 - Storing/queuing pre-generated videos for the cloud publisher.

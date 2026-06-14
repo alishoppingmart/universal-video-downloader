@@ -10,11 +10,12 @@ You give it your ideas and a posting schedule; it generates the video with
 topic  →  generate (Google Flow)  →  download  →  publish (YouTube + TikTok)
 ```
 
-## Two apps in this repo
+## Apps in this repo
 | App | What it is | Build |
 | --- | --- | --- |
-| **AI Video Studio** (`ai_video_studio/`, `studio_app.py`) | The new auto-create-and-publish system | `.github/workflows/build-studio.yml` → Windows `.exe` |
-| **Universal Video Downloader** (`universal_downloader.py`) | The original downloader (TikTok/YouTube/FB/IG) | `.github/workflows/build-windows.yml` |
+| **AI Video Studio — desktop** (`ai_video_studio/`, `studio_app.py`) | Full create-and-publish system | `build-studio.yml` → Windows `.exe` |
+| **AI Video Studio — mobile** (`mobile/`, `main.py`) | Android control panel that drives the cloud | `build-android.yml` → Android `.apk` |
+| **Universal Video Downloader** (`universal_downloader.py`) | The original downloader (TikTok/YouTube/FB/IG) | `build-windows.yml` |
 
 ## Quick start
 ```bash
@@ -25,10 +26,10 @@ python studio_app.py
 Then follow **[docs/SETUP.md](docs/SETUP.md)** to connect your accounts.
 
 ## Status
-**v0.1 — desktop foundation.** Pipeline, GUI, scheduler, Google Flow generator,
-YouTube + TikTok publishers, and Windows build are in place. You connect your own
-accounts (one-time, required by each platform). See the roadmap in SETUP.md —
-mobile (Android APK) and a free generation fallback are next.
+**v0.1 — desktop + mobile foundation.** Pipeline, desktop GUI, scheduler, Google
+Flow generator, YouTube + TikTok publishers, Windows `.exe` build, and an Android
+`.apk` control-panel app are all in place. You connect your own accounts (one-time,
+required by each platform). See the roadmap in SETUP.md.
 
 ## Honest notes
 - **Google Flow** has no public API; the app drives the Flow website using a
