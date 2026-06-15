@@ -23,7 +23,9 @@ pip install -r requirements.txt
 playwright install chromium
 python studio_app.py
 ```
-Then follow **[docs/SETUP.md](docs/SETUP.md)** to connect your accounts.
+Then connect your accounts — the easiest path is the click-by-click
+**[docs/CONNECT_GUIDE.md](docs/CONNECT_GUIDE.md)** (full details in
+**[docs/SETUP.md](docs/SETUP.md)**).
 
 ## Status
 **v0.1 — desktop + mobile foundation.** Pipeline, desktop GUI, scheduler, Google

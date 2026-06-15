@@ -28,7 +28,9 @@ jobs:
           pip install pyinstaller
 
       - name: Build the EXE
-        run: pyinstaller --onefile --windowed --name AIVideoStudio studio_app.py
+        # --collect-all playwright bundles the browser driver so the app can
+        # auto-download Chromium at first run (for the Google Flow login popup).
+        run: pyinstaller --onefile --windowed --name AIVideoStudio --collect-all playwright studio_app.py
 
       - name: Assemble portable kit
         shell: pwsh

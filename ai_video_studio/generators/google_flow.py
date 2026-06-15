@@ -25,11 +25,18 @@ NOTE ON SELECTORS:
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 from .base import VideoGenerator, GenerationError, LogFn
-from ..config import FLOW_SESSION_FILE
+from ..config import FLOW_SESSION_FILE, BROWSERS_DIR
+
+# Tell Playwright to keep its downloaded browser in our app folder (writable by
+# a packaged .exe). MUST be set before Playwright is imported anywhere.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(BROWSERS_DIR))
 
 FLOW_URL = "https://labs.google/fx/tools/flow"
 
@@ -59,6 +66,41 @@ class GoogleFlowGenerator(VideoGenerator):
             return False, "Playwright not installed. Run: pip install playwright && playwright install chromium"
         return True, "Ready"
 
+    # -- make sure the browser engine is present (auto-download once) -------
+    def _ensure_browser(self, log: LogFn = print) -> None:
+        """Download Chromium on first use so the packaged .exe just works.
+
+        Happens once (~150 MB, needs internet). Subsequent runs skip it.
+        """
+        BROWSERS_DIR.mkdir(parents=True, exist_ok=True)
+        if any(BROWSERS_DIR.glob("chromium-*")):
+            return  # already installed
+        log("First-time setup: downloading the browser engine (~150 MB). One time only...")
+        try:
+            # Works both from source and inside a PyInstaller build that was
+            # packaged with '--collect-all playwright'.
+            from playwright.__main__ import main as pw_main
+            saved_argv = sys.argv
+            sys.argv = ["playwright", "install", "chromium"]
+            try:
+                pw_main()
+            except SystemExit:
+                pass
+            finally:
+                sys.argv = saved_argv
+        except Exception:
+            # Fallback for a normal Python install (not frozen).
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                check=False,
+            )
+        if not any(BROWSERS_DIR.glob("chromium-*")):
+            raise GenerationError(
+                "Could not download the browser engine. Check your internet "
+                "connection and try 'Connect Google Flow' again."
+            )
+        log("Browser engine ready.")
+
     # -- one-time interactive login -----------------------------------------
     def capture_session(self, log: LogFn = print) -> None:
         """Open a real browser, let the user log in, then save the session.
@@ -73,6 +115,7 @@ class GoogleFlowGenerator(VideoGenerator):
                 "Playwright is required. Run: pip install playwright && playwright install chromium"
             ) from e
 
+        self._ensure_browser(log)
         log("Opening a browser window. Please sign in to Google Flow...")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -98,6 +141,7 @@ class GoogleFlowGenerator(VideoGenerator):
 
         from playwright.sync_api import sync_playwright
 
+        self._ensure_browser(log)
         log(f"Generating video for prompt: {prompt!r}")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)

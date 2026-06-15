@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 
@@ -140,10 +141,12 @@ class StudioApp:
         self.yt_secret = tk.StringVar()
         self._labeled_entry(f2, "Client ID:", self.yt_id)
         self._labeled_entry(f2, "Client secret:", self.yt_secret, show="*")
+        ttk.Label(f2, text="New here? Use the wizard to get your keys in ~5 minutes.").pack(anchor="w", padx=10)
         btns = ttk.Frame(f2)
         btns.pack(fill="x", padx=10, pady=6)
-        ttk.Button(btns, text="Save keys", command=self._save_yt_keys).pack(side="left")
-        ttk.Button(btns, text="Connect YouTube", command=self._connect_youtube).pack(side="left", padx=8)
+        ttk.Button(btns, text="Setup wizard", command=self._youtube_wizard).pack(side="left")
+        ttk.Button(btns, text="Save keys", command=self._save_yt_keys).pack(side="left", padx=8)
+        ttk.Button(btns, text="Connect YouTube", command=self._connect_youtube).pack(side="left")
 
         # TikTok
         f3 = ttk.LabelFrame(parent, text="TikTok")
@@ -204,6 +207,51 @@ class StudioApp:
             fn()
         except Exception as e:
             self.log(f"!! {e}")
+
+    # -- YouTube setup wizard ------------------------------------------------
+    def _youtube_wizard(self) -> None:
+        """A step-by-step window: open each Google page, then paste the keys."""
+        win = tk.Toplevel(self.root)
+        win.title("YouTube setup wizard")
+        win.geometry("560x560")
+
+        steps = [
+            ("1. Create a free Google Cloud project",
+             "Click Open, then press 'Create' on Google's page.",
+             "https://console.cloud.google.com/projectcreate"),
+            ("2. Turn on the YouTube Data API",
+             "Click Open, then press 'Enable'. (Make sure your new project is selected, top-left.)",
+             "https://console.cloud.google.com/apis/library/youtube.googleapis.com"),
+            ("3. Set up the consent screen",
+             "Click Open. Choose 'External', fill the app name + your email, and Save. Add yourself as a Test user.",
+             "https://console.cloud.google.com/apis/credentials/consent"),
+            ("4. Create the OAuth key",
+             "Click Open -> 'Create credentials' -> 'OAuth client ID' -> type 'Desktop app' -> Create.",
+             "https://console.cloud.google.com/apis/credentials"),
+        ]
+
+        ttk.Label(win, text="Do these 4 steps in order, then paste your two keys below.",
+                  wraplength=520, font=("", 10, "bold")).pack(anchor="w", padx=12, pady=8)
+
+        for title, hint, url in steps:
+            frame = ttk.Frame(win)
+            frame.pack(fill="x", padx=12, pady=4)
+            ttk.Label(frame, text=title, font=("", 10, "bold")).pack(anchor="w")
+            ttk.Label(frame, text=hint, wraplength=440, foreground="#444").pack(side="left", anchor="w")
+            ttk.Button(frame, text="Open", command=lambda u=url: webbrowser.open(u)).pack(side="right")
+
+        ttk.Separator(win).pack(fill="x", padx=12, pady=8)
+        ttk.Label(win, text="5. Paste the two values Google gave you:",
+                  font=("", 10, "bold")).pack(anchor="w", padx=12)
+        self._labeled_entry(win, "Client ID:", self.yt_id)
+        self._labeled_entry(win, "Client secret:", self.yt_secret, show="*")
+
+        endbtns = ttk.Frame(win)
+        endbtns.pack(fill="x", padx=12, pady=12)
+        ttk.Button(endbtns, text="Save keys", command=self._save_yt_keys).pack(side="left")
+        ttk.Button(endbtns, text="6. Connect YouTube (login)",
+                   command=self._connect_youtube).pack(side="left", padx=8)
+        ttk.Button(endbtns, text="Done", command=win.destroy).pack(side="right")
 
     # -- run -----------------------------------------------------------------
     def _toggle_scheduler(self) -> None:

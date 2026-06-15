@@ -7,6 +7,10 @@ auto-publishes them to **YouTube Shorts** and **TikTok** on a schedule.
 > provide the account connections (these are one-time and unavoidable, because
 > Google/YouTube/TikTok require *you* to authorize access to your own accounts).
 
+> 👉 **Just want the simplest click-by-click version?** See
+> **[CONNECT_GUIDE.md](CONNECT_GUIDE.md)** — and the app now has a built-in
+> **YouTube Setup wizard** (Accounts tab) that walks you through it.
+
 ---
 
 ## 1. Install / run

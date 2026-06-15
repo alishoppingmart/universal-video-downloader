@@ -23,6 +23,9 @@ from typing import Any
 APP_DIR = Path.home() / ".ai_video_studio"
 VIDEOS_DIR = APP_DIR / "videos"
 LOGS_DIR = APP_DIR / "logs"
+# Where the auto-downloaded browser engine (Chromium) lives. Kept in the app
+# folder so a packaged .exe can write to it without admin rights.
+BROWSERS_DIR = APP_DIR / "browsers"
 
 SETTINGS_FILE = APP_DIR / "settings.json"
 SECRETS_FILE = APP_DIR / "secrets.json"
