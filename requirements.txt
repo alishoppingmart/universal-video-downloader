@@ -1,0 +1,19 @@
+# AI Video Studio - Python dependencies
+#
+# The desktop GUI itself uses only the Python standard library (tkinter),
+# so the app will *open* even if the packages below are missing. They are
+# needed for the actual generate / publish features.
+
+# --- Google Flow automation (text -> video) ---
+playwright>=1.44          # headless browser used to drive the Flow website
+
+# --- YouTube publishing (official Data API v3) ---
+google-api-python-client>=2.130
+google-auth-oauthlib>=1.2
+google-auth>=2.30
+
+# --- TikTok publishing (official Content Posting API) ---
+requests>=2.32
+
+# --- Misc ---
+# (scheduling uses the standard library; no extra dependency required)

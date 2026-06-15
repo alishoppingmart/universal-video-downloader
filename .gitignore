@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+
+# App data / secrets - NEVER commit these
+.ai_video_studio/
+secrets.json
+flow_session.json
+*.mp4
+
+# OS
+.DS_Store
+Thumbs.db
