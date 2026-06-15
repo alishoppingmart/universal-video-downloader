@@ -5,19 +5,26 @@ This explains, in simple steps, how to connect **Google Flow**, **YouTube**, and
 
 ---
 
-## A. Google Flow (makes the videos) — easiest
+## A. Google Flow (makes the videos)
 
-1. Open the app → **Accounts** tab.
-2. Click **Connect Google Flow**.
-3. **First time only:** the app downloads a small browser engine (~150 MB).
-   This takes a few minutes and needs internet. You'll see "downloading the
-   browser engine" in the log. *This happens just once.*
-4. A browser window opens. **Log in to your Google account** and wait until you
-   can see the Google Flow page.
-5. The app saves your login and closes the window. ✅ Done.
+**Important — do this first:** open your **normal Google Chrome** and make sure
+you're **signed in to your Google account** (the one with Flow access). The app
+reuses your real Chrome so Google doesn't block it.
 
-> Your Google **password is never stored** — only a temporary "logged-in" token,
-> the same way your browser stays logged in.
+1. **Close all Chrome windows** (the app needs to borrow your Chrome profile).
+2. In the app → **Accounts** tab → click **Connect Google Flow**.
+3. Chrome opens on the Flow page. Because you're already signed in, it usually
+   loads straight away. If it asks, sign in normally.
+4. Once Flow appears, the app remembers it and closes the window. ✅ Done.
+
+> Your Google **password is never stored** — the app just reuses the same
+> "logged-in" cookies your Chrome already has.
+
+### ⚠️ If you see "Couldn't sign you in — this browser may not be secure"
+That's Google blocking an automated login. Fix it like this:
+- Make sure **real Google Chrome is installed** (not just Edge).
+- **Sign in to Google in normal Chrome first**, then fully close Chrome and try
+  **Connect Google Flow** again — riding your existing login avoids the block.
 
 If it ever stops working, just click **Connect Google Flow** again.
 
@@ -70,6 +77,7 @@ account so you can see exactly what's still missing.
 | Problem | Fix |
 | --- | --- |
 | "Playwright not installed" on Connect Flow | Use the latest `.exe` build; the new one auto-downloads the browser. |
-| Flow login window never appears | Check internet; the first download is ~150 MB. |
+| "Couldn't sign you in / browser may not be secure" | Sign in to Google in normal Chrome first, close Chrome, then Connect again. Make sure Chrome is installed. |
+| Flow login window never appears | Check internet; if no Chrome is installed it downloads a browser (~150 MB). |
 | YouTube "access blocked / unverified" | Add your own email under *Test users* on the consent screen (step 3). |
 | TikTok only saves to Drafts | Normal until TikTok approves Direct Post for your app. |

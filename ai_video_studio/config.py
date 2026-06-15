@@ -30,6 +30,10 @@ BROWSERS_DIR = APP_DIR / "browsers"
 SETTINGS_FILE = APP_DIR / "settings.json"
 SECRETS_FILE = APP_DIR / "secrets.json"
 FLOW_SESSION_FILE = APP_DIR / "flow_session.json"
+# A persistent browser profile for Google Flow. Reusing one profile means you
+# stay logged in (like a normal browser) instead of signing in every time —
+# which also avoids Google's "this browser may not be secure" block.
+FLOW_PROFILE_DIR = APP_DIR / "flow_profile"
 
 for _d in (APP_DIR, VIDEOS_DIR, LOGS_DIR):
     _d.mkdir(parents=True, exist_ok=True)

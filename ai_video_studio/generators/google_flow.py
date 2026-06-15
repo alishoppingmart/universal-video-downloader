@@ -32,7 +32,11 @@ import time
 from pathlib import Path
 
 from .base import VideoGenerator, GenerationError, LogFn
-from ..config import FLOW_SESSION_FILE, BROWSERS_DIR
+from ..config import FLOW_SESSION_FILE, FLOW_PROFILE_DIR, BROWSERS_DIR
+
+# Flags that hide the "I'm an automated browser" signals Google looks for.
+STEALTH_ARGS = ["--disable-blink-features=AutomationControlled"]
+IGNORE_ARGS = ["--enable-automation"]
 
 # Tell Playwright to keep its downloaded browser in our app folder (writable by
 # a packaged .exe). MUST be set before Playwright is imported anywhere.
@@ -101,12 +105,36 @@ class GoogleFlowGenerator(VideoGenerator):
             )
         log("Browser engine ready.")
 
+    # -- shared browser launcher --------------------------------------------
+    def _launch_context(self, p, headless: bool, log: LogFn):
+        """Open a persistent browser profile that looks like a normal browser.
+
+        Uses the real Google Chrome you already have installed when possible
+        (Google trusts it far more than a bundled/automation browser), and
+        reuses one profile folder so your login sticks.
+        """
+        FLOW_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        common = dict(
+            user_data_dir=str(FLOW_PROFILE_DIR),
+            headless=headless,
+            args=STEALTH_ARGS,
+            ignore_default_args=IGNORE_ARGS,
+            viewport={"width": 1280, "height": 820},
+        )
+        # Prefer the user's installed Chrome; fall back to the bundled engine.
+        try:
+            return p.chromium.launch_persistent_context(channel="chrome", **common)
+        except Exception as e:
+            log(f"Couldn't use installed Chrome ({e}); using the bundled browser.")
+            self._ensure_browser(log)
+            return p.chromium.launch_persistent_context(**common)
+
     # -- one-time interactive login -----------------------------------------
     def capture_session(self, log: LogFn = print) -> None:
-        """Open a real browser, let the user log in, then save the session.
+        """Open a real browser, let the user log in, then remember the session.
 
-        Call this from the GUI's 'Connect Google Flow' button. It blocks until
-        the user has signed in and pressed Enter / closed the helper.
+        Called by the GUI's 'Connect Google Flow' button. Blocks until you've
+        signed in and Flow has loaded (up to 5 minutes).
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -115,23 +143,26 @@ class GoogleFlowGenerator(VideoGenerator):
                 "Playwright is required. Run: pip install playwright && playwright install chromium"
             ) from e
 
-        self._ensure_browser(log)
-        log("Opening a browser window. Please sign in to Google Flow...")
+        log("Opening Chrome. If you're already signed in to Google, Flow just opens.")
+        log("If asked, sign in normally. (Using real Chrome avoids Google's security block.)")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context()
-            page = context.new_page()
+            context = self._launch_context(p, headless=False, log=log)
+            page = context.pages[0] if context.pages else context.new_page()
             page.goto(FLOW_URL, wait_until="domcontentloaded")
-            log("Waiting for you to finish signing in (up to 5 minutes)...")
-            # Wait until the prompt box appears, which means we're inside Flow.
+            log("Waiting for Flow to load (sign in if needed)...")
             try:
                 page.wait_for_selector(SELECTORS["prompt_box"], timeout=5 * 60 * 1000)
             except Exception as e:
-                browser.close()
-                raise GenerationError("Did not detect a signed-in Flow session in time.") from e
+                context.close()
+                raise GenerationError(
+                    "Didn't reach the Flow page in time. If Google said 'browser may not "
+                    "be secure', make sure Google Chrome is installed and you're signed "
+                    "into your Google account in normal Chrome first."
+                ) from e
+            # Persist a storage-state marker (the profile folder holds the real login).
             context.storage_state(path=str(FLOW_SESSION_FILE))
-            browser.close()
-        log("Google Flow session saved. You won't need to sign in again unless it expires.")
+            context.close()
+        log("Connected to Google Flow. You won't need to sign in again unless it expires.")
 
     # -- the actual generation ----------------------------------------------
     def generate(self, prompt: str, out_path: Path, log: LogFn = print) -> Path:
@@ -141,12 +172,11 @@ class GoogleFlowGenerator(VideoGenerator):
 
         from playwright.sync_api import sync_playwright
 
-        self._ensure_browser(log)
         log(f"Generating video for prompt: {prompt!r}")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(storage_state=str(FLOW_SESSION_FILE))
-            page = context.new_page()
+            # Reuse the same logged-in profile from 'Connect Google Flow'.
+            context = self._launch_context(p, headless=True, log=log)
+            page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(FLOW_URL, wait_until="domcontentloaded")
 
@@ -173,7 +203,7 @@ class GoogleFlowGenerator(VideoGenerator):
                     f"update SELECTORS in generators/google_flow.py."
                 ) from e
             finally:
-                browser.close()
+                context.close()
 
     def _wait_for_result(self, page, log: LogFn) -> str:
         deadline = time.time() + GENERATION_TIMEOUT_S
