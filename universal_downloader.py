@@ -25,6 +25,7 @@ import shutil
 import zipfile
 import threading
 import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -327,6 +328,10 @@ class DownloaderApp:
         tk.Button(btns, text="⟳ Update yt-dlp", command=self._update_ytdlp).pack(side="left", padx=4)
         tk.Button(btns, text="🗑 Clear archive (re-download all)",
                   command=self._clear_archive).pack(side="left", padx=4)
+        tk.Button(btns, text="🎬 Promo Extractor",
+                  command=self._open_promo_extractor,
+                  bg="#1a3a5c", fg="white",
+                  font=("Segoe UI", 9, "bold")).pack(side="right", padx=4)
 
         # ---- Progress + status ----
         self.progress = ttk.Progressbar(self.root, mode="determinate", maximum=100)
@@ -807,6 +812,9 @@ class DownloaderApp:
                 pass
         self.log("Stopping…")
 
+    def _open_promo_extractor(self):
+        PromoExtractorWindow(self.root, self)
+
     def _on_close(self):
         self._save_settings()
         self.stop_event.set()
@@ -816,6 +824,581 @@ class DownloaderApp:
             except Exception:
                 pass
         self.root.destroy()
+
+
+# ----------------------------------------------------------------------------
+# Promo Extractor — standalone Toplevel window
+# ----------------------------------------------------------------------------
+class PromoExtractorWindow:
+    """
+    Extracts the promotional script from any video — either a public URL
+    (TikTok, YouTube, Instagram, Facebook) or a local video file.
+
+    URL path  : yt-dlp fetches auto-captions / subtitles + metadata.
+    Local path: ffmpeg extracts audio, then openai-whisper transcribes it.
+
+    Results are split into three tabs:
+      1. Full Transcript / Script
+      2. Promo Elements (Hook · Key Points · CTA · Template)
+      3. Video Info (title, description, tags)
+    """
+
+    def __init__(self, master, app):
+        self.master = master
+        self.app = app          # reference to DownloaderApp for binaries + settings
+        self.is_running = False
+        self.stop_event = threading.Event()
+        self._temp_dir = None
+        self._subproc = None
+
+        self.win = tk.Toplevel(master)
+        self.win.title("Promo Extractor — AJ Tech")
+        self.win.geometry("980x740")
+        self.win.minsize(740, 540)
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build_ui()
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        pad = {"padx": 8, "pady": 4}
+
+        # Header
+        tk.Label(self.win, text="Video Promotion Extractor",
+                 font=("Segoe UI", 14, "bold"), fg="#1a7a3e").pack(pady=(10, 2))
+        tk.Label(self.win,
+                 text="Paste any video URL or select a local file — extract the original script "
+                      "so you can create your own content with your own copyright",
+                 font=("Segoe UI", 9), fg="#555", wraplength=920).pack(pady=(0, 8))
+
+        # Input panel
+        inp = tk.LabelFrame(self.win, text="Input")
+        inp.pack(fill="x", padx=12, pady=4)
+
+        r1 = tk.Frame(inp); r1.pack(fill="x", **pad)
+        tk.Label(r1, text="Video URL:", width=17, anchor="w").pack(side="left")
+        self.url_var = tk.StringVar()
+        tk.Entry(r1, textvariable=self.url_var,
+                 font=("Consolas", 10)).pack(side="left", fill="x", expand=True, padx=6)
+
+        r2 = tk.Frame(inp); r2.pack(fill="x", **pad)
+        tk.Label(r2, text="— or Local File:", width=17, anchor="w").pack(side="left")
+        self.file_var = tk.StringVar()
+        tk.Entry(r2, textvariable=self.file_var,
+                 font=("Consolas", 10)).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Button(r2, text="Browse…", command=self._browse_file).pack(side="left")
+
+        r3 = tk.Frame(inp); r3.pack(fill="x", **pad)
+        tk.Label(r3, text="Subtitle language:", width=17, anchor="w").pack(side="left")
+        self.lang_var = tk.StringVar(value="en")
+        lang_choices = ["en", "ar", "es", "fr", "de", "hi", "pt", "zh", "ja", "ko", "auto"]
+        ttk.Combobox(r3, textvariable=self.lang_var, values=lang_choices,
+                     state="readonly", width=7).pack(side="left", padx=6)
+        tk.Label(r3, text="('auto' = first available language in the video)",
+                 fg="#666", font=("Segoe UI", 9)).pack(side="left", padx=8)
+
+        # Action buttons
+        btn_row = tk.Frame(self.win)
+        btn_row.pack(pady=8)
+        self.extract_btn = tk.Button(
+            btn_row, text="▶  Extract Promo Script",
+            command=self._start_extraction,
+            bg="#1a7a3e", fg="white",
+            font=("Segoe UI", 11, "bold"), padx=14, pady=6)
+        self.extract_btn.pack(side="left", padx=6)
+        self.stop_btn = tk.Button(
+            btn_row, text="■ Stop", command=self._stop,
+            state="disabled", padx=10, pady=6)
+        self.stop_btn.pack(side="left", padx=6)
+        tk.Button(btn_row, text="Clear", command=self._clear,
+                  padx=10, pady=6).pack(side="left", padx=6)
+
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready — paste a URL or select a file above")
+        tk.Label(self.win, textvariable=self.status_var, anchor="w",
+                 fg="#1a7a3e").pack(fill="x", padx=12, pady=(0, 4))
+
+        # Results notebook
+        nb = ttk.Notebook(self.win)
+        nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        def _make_tab(label, tip):
+            frame = ttk.Frame(nb)
+            nb.add(frame, text=f"  {label}  ")
+            top = tk.Frame(frame); top.pack(fill="x", padx=4, pady=2)
+            txt = scrolledtext.ScrolledText(
+                frame, wrap="word", font=("Segoe UI", 10), bg="#f8f9fa")
+            txt.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+            tk.Button(top, text="📋 Copy All",
+                      command=lambda t=txt: self._copy(t)).pack(side="left", padx=4)
+            tk.Label(top, text=tip, fg="#666",
+                     font=("Segoe UI", 9)).pack(side="left", padx=8)
+            return txt
+
+        self.transcript_text = _make_tab(
+            "Full Transcript / Script",
+            "Complete spoken content extracted from the video")
+        self.promo_text = _make_tab(
+            "Promo Elements",
+            "Hook · Key Points · Call-to-Action — use as inspiration for YOUR own content")
+        self.info_text = _make_tab(
+            "Video Info",
+            "Title, description and tags — public metadata from the video")
+
+    # ---------------------------------------------------------------- helpers
+    def _browse_file(self):
+        f = filedialog.askopenfilename(
+            parent=self.win,
+            title="Select a video file",
+            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.m4v *.ts"),
+                       ("All files", "*.*")])
+        if f:
+            self.file_var.set(f)
+            self.url_var.set("")
+
+    def _copy(self, widget):
+        text = widget.get("1.0", "end").strip()
+        if text:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(text)
+            messagebox.showinfo("Copied", "Content copied to clipboard.", parent=self.win)
+
+    def _clear(self):
+        for w in (self.transcript_text, self.promo_text, self.info_text):
+            w.delete("1.0", "end")
+        self.status_var.set("Ready — paste a URL or select a file above")
+
+    def _stop(self):
+        self.stop_event.set()
+        if self._subproc:
+            try:
+                self._subproc.kill()
+            except Exception:
+                pass
+        self._set_status("Stopping…")
+
+    def _on_close(self):
+        self.stop_event.set()
+        if self._subproc:
+            try:
+                self._subproc.kill()
+            except Exception:
+                pass
+        try:
+            if self._temp_dir:
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        self.win.destroy()
+
+    def _set_status(self, msg):
+        self.win.after(0, lambda: self.status_var.set(msg))
+
+    def _set_text(self, widget, text):
+        def _do():
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.see("1.0")
+        self.win.after(0, _do)
+
+    def _finish(self):
+        self.is_running = False
+        def _do():
+            self.extract_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+        self.win.after(0, _do)
+
+    # ---------------------------------------------------------- extraction
+    def _start_extraction(self):
+        if self.is_running:
+            return
+        url   = self.url_var.get().strip()
+        local = self.file_var.get().strip()
+        if not url and not local:
+            messagebox.showwarning(
+                "No Input",
+                "Paste a video URL or select a local video file first.",
+                parent=self.win)
+            return
+        if local and not Path(local).exists():
+            messagebox.showerror("File Not Found",
+                                  f"File not found:\n{local}", parent=self.win)
+            return
+
+        self._clear()
+        self.is_running = True
+        self.stop_event.clear()
+        self.extract_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self._set_status("Starting extraction…")
+
+        if url:
+            threading.Thread(target=self._run_url, args=(url,), daemon=True).start()
+        else:
+            threading.Thread(target=self._run_file, args=(local,), daemon=True).start()
+
+    # ---- URL path: yt-dlp captions + metadata ----------------------------
+    def _run_url(self, url):
+        try:
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="promo_"))
+            self._set_status("Fetching captions and metadata from URL…")
+
+            # Resolve yt-dlp binary (prefer app's own copy)
+            ytdlp_bin = self.app.ytdlp_bin
+            if isinstance(ytdlp_bin, Path) and not ytdlp_bin.exists():
+                ytdlp_bin = "yt-dlp"
+            ytdlp_cmd = str(ytdlp_bin)
+
+            lang = self.lang_var.get()
+
+            cmd = [ytdlp_cmd,
+                   "--skip-download",
+                   "--write-auto-subs",
+                   "--write-subs",
+                   "--convert-subs", "srt",
+                   "--write-description",
+                   "--write-info-json",
+                   "--no-warnings",
+                   "--ignore-errors",
+                   "-o", str(self._temp_dir / "%(id)s.%(ext)s"),
+                   url]
+
+            if lang != "auto":
+                cmd += ["--sub-lang", lang]
+
+            # Reuse auth / ffmpeg settings from the main downloader window
+            if IS_WINDOWS and self.app.ffmpeg_bin and self.app.ffmpeg_bin.exists():
+                cmd += ["--ffmpeg-location", str(self.app.ffmpeg_dir)]
+            if self.app.impersonate_var.get():
+                cmd += ["--impersonate", "chrome"]
+            if self.app.cookies_var.get().strip():
+                cmd += ["--cookies", self.app.cookies_var.get().strip()]
+            elif self.app.browser_cookies_var.get():
+                cmd += ["--cookies-from-browser", self.app.browser_var.get()]
+
+            self._subproc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+
+            log_lines = []
+            for line in self._subproc.stdout:
+                log_lines.append(line.rstrip())
+                if self.stop_event.is_set():
+                    self._subproc.kill()
+                    break
+            self._subproc.wait()
+
+            if self.stop_event.is_set():
+                self._set_status("Stopped.")
+                return
+
+            self._parse_url_output(url, log_lines)
+
+        except Exception as exc:
+            self._set_text(self.transcript_text, f"Error:\n{exc}")
+            self._set_status("Error.")
+        finally:
+            try:
+                if self._temp_dir:
+                    shutil.rmtree(self._temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._finish()
+
+    def _parse_url_output(self, url, log_lines):
+        temp_dir = self._temp_dir
+        lang     = self.lang_var.get()
+
+        info_files = sorted(temp_dir.glob("*.info.json"))
+        desc_files = sorted(temp_dir.glob("*.description"))
+        srt_files  = sorted(temp_dir.glob("*.srt"))
+        vtt_files  = sorted(temp_dir.glob("*.vtt"))
+
+        title = uploader = description = ""
+        tags = []
+
+        if info_files:
+            try:
+                info     = json.loads(info_files[0].read_text(encoding="utf-8"))
+                title    = info.get("title", "")
+                uploader = info.get("uploader") or info.get("channel", "")
+                description = info.get("description", "")
+                tags     = info.get("tags") or []
+            except Exception:
+                pass
+
+        if desc_files and not description:
+            description = desc_files[0].read_text(encoding="utf-8", errors="replace").strip()
+
+        def _pick(files):
+            if lang != "auto":
+                preferred = [f for f in files if f".{lang}" in f.name.lower()]
+                if preferred:
+                    return preferred[0]
+            return files[0] if files else None
+
+        sub_file   = _pick(srt_files) or _pick(vtt_files)
+        transcript = ""
+        if sub_file:
+            raw = sub_file.read_text(encoding="utf-8", errors="replace")
+            transcript = (self._parse_srt(raw) if sub_file.suffix == ".srt"
+                          else self._parse_vtt(raw))
+
+        if not transcript and not description:
+            err_log = "\n".join(log_lines[-20:])
+            self._set_text(self.transcript_text,
+                f"No captions or description found for this video.\n\n"
+                f"Possible reasons:\n"
+                f"  • The video has no auto-captions or manual subtitles\n"
+                f"  • Language '{lang}' not available — try changing to 'auto'\n"
+                f"  • The video requires login (enable cookies in the main window)\n\n"
+                f"yt-dlp output (last 20 lines):\n{err_log}")
+            self._set_status("No content found.")
+            return
+
+        display_transcript = transcript or f"[No spoken transcript — showing description]\n\n{description}"
+        self._set_text(self.transcript_text, display_transcript)
+        self._set_text(self.info_text, self._format_info(title, uploader, description, tags))
+        self._set_text(self.promo_text,
+                       self._build_promo_elements(title, transcript or description, tags))
+
+        short = (title[:55] + "…") if len(title) > 55 else title
+        self._set_status(f"Done!  Extracted from: {short or url}")
+
+    # ---- Local-file path: ffmpeg audio + Whisper transcription -----------
+    def _run_file(self, file_path):
+        try:
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="promo_"))
+            audio_path = self._temp_dir / "audio.wav"
+            self._set_status("Extracting audio from video file…")
+
+            ffmpeg_cmd = "ffmpeg"
+            if isinstance(self.app.ffmpeg_bin, Path) and self.app.ffmpeg_bin.exists():
+                ffmpeg_cmd = str(self.app.ffmpeg_bin)
+
+            cmd = [ffmpeg_cmd, "-y", "-i", file_path,
+                   "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                   str(audio_path)]
+            self._subproc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+            self._subproc.communicate()
+
+            if self.stop_event.is_set():
+                self._set_status("Stopped.")
+                return
+
+            if self._subproc.returncode != 0 or not audio_path.exists():
+                self._set_text(self.transcript_text,
+                    "Could not extract audio from the video file.\n\n"
+                    "Make sure ffmpeg is available and the file is a valid video format.")
+                self._set_status("Audio extraction failed.")
+                return
+
+            self._set_status("Transcribing with Whisper (may take 1–3 minutes)…")
+            transcript = self._transcribe(str(audio_path))
+            if transcript is None:
+                return  # error text already shown
+
+            fname = Path(file_path).stem
+            self._set_text(self.transcript_text, transcript)
+            self._set_text(self.info_text, self._format_info(fname, "", "", []))
+            self._set_text(self.promo_text,
+                           self._build_promo_elements(fname, transcript, []))
+            self._set_status(f"Done!  Transcript from: {Path(file_path).name}")
+
+        except Exception as exc:
+            self._set_text(self.transcript_text, f"Error:\n{exc}")
+            self._set_status("Error.")
+        finally:
+            try:
+                if self._temp_dir:
+                    shutil.rmtree(self._temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._finish()
+
+    def _transcribe(self, audio_path):
+        """Transcribe with openai-whisper. Returns text or None on failure."""
+        try:
+            import whisper
+        except ImportError:
+            self._set_text(self.transcript_text,
+                "Whisper (speech-to-text) is not installed.\n\n"
+                "To transcribe LOCAL video files, install it by running:\n"
+                "    pip install openai-whisper\n\n"
+                "Tip: for online videos (YouTube, TikTok, Instagram) paste the URL\n"
+                "instead — captions are extracted automatically without Whisper.\n\n"
+                "After installing Whisper, restart the app and try again.")
+            self._set_status("Whisper not installed — see transcript tab for instructions.")
+            return None
+        try:
+            self._set_status("Loading Whisper model (base)…")
+            model = whisper.load_model("base")
+            self._set_status("Transcribing audio…")
+            result = model.transcribe(audio_path, fp16=False)
+            return result.get("text", "").strip()
+        except Exception as exc:
+            self._set_text(self.transcript_text,
+                f"Whisper transcription error:\n{exc}\n\n"
+                "Make sure 'openai-whisper' and 'ffmpeg' are properly installed.")
+            self._set_status("Transcription error.")
+            return None
+
+    # ----------------------------------------------------------- parsers
+    @staticmethod
+    def _parse_srt(content):
+        """Return clean plain text from an SRT subtitle string."""
+        clean = []
+        for line in content.splitlines():
+            line = line.strip()
+            if re.match(r"^\d+$", line):
+                continue
+            if re.match(r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}", line):
+                continue
+            line = re.sub(r"<[^>]+>", "", line).strip()
+            if line:
+                clean.append(line)
+        deduped, prev = [], None
+        for ln in clean:
+            if ln != prev:
+                deduped.append(ln)
+            prev = ln
+        return " ".join(deduped)
+
+    @staticmethod
+    def _parse_vtt(content):
+        """Return clean plain text from a WebVTT subtitle string."""
+        clean = []
+        in_cue = False
+        ts_re = re.compile(
+            r"\d{2}:\d{2}(:\d{2})?[.,]\d{3}\s*-->\s*\d{2}:\d{2}(:\d{2})?[.,]\d{3}")
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("WEBVTT") or line.startswith("NOTE"):
+                continue
+            if ts_re.match(line):
+                in_cue = True
+                continue
+            if not line:
+                in_cue = False
+                continue
+            if in_cue:
+                line = re.sub(r"<[^>]+>", "", line)
+                line = re.sub(r"\{[^}]+\}", "", line).strip()
+                if line:
+                    clean.append(line)
+        deduped, prev = [], None
+        for ln in clean:
+            if ln != prev:
+                deduped.append(ln)
+            prev = ln
+        return " ".join(deduped)
+
+    # -------------------------------------------------------- formatting
+    @staticmethod
+    def _format_info(title, uploader, description, tags):
+        parts = []
+        if title:
+            parts.append(f"TITLE\n{'─'*50}\n{title}\n")
+        if uploader:
+            parts.append(f"CREATOR\n{'─'*50}\n{uploader}\n")
+        if description:
+            excerpt = description[:1500] + ("…" if len(description) > 1500 else "")
+            parts.append(f"DESCRIPTION\n{'─'*50}\n{excerpt}\n")
+        if tags:
+            parts.append(f"TAGS\n{'─'*50}\n{', '.join(str(t) for t in tags[:30])}\n")
+        return "\n".join(parts) or "No metadata available."
+
+    @staticmethod
+    def _build_promo_elements(title, text, tags):
+        """Extract hook, key points, CTA and build a fill-in-the-blank template."""
+        if not text:
+            return "No text available to analyse."
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text)
+                     if s.strip() and len(s.strip()) > 8]
+
+        # Top keywords (frequency-based, minus stop words)
+        words = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
+        stop = {"this", "that", "with", "from", "have", "will", "your", "they",
+                "what", "when", "where", "which", "their", "there", "about",
+                "just", "like", "make", "more", "also", "than", "then", "very",
+                "some", "been", "were", "into", "each", "such", "these", "those",
+                "would", "could", "should", "really", "going", "being", "know",
+                "people", "think", "want", "need", "time", "right", "even", "back"}
+        freq = {}
+        for w in words:
+            if w not in stop:
+                freq[w] = freq.get(w, 0) + 1
+        keywords = sorted(freq, key=freq.get, reverse=True)[:12]
+
+        sep = "=" * 54
+        out = [sep, "EXTRACTED PROMO ELEMENTS", sep, ""]
+
+        if title:
+            out += ["TITLE:", f"  {title}", ""]
+
+        # Hook — first 2-3 sentences
+        out.append("HOOK  (opening — grab attention in the first 3 seconds):")
+        hook = sentences[:3] if sentences else []
+        out += [f"  • {s}" for s in hook] or ["  [none found]"]
+        out.append("")
+
+        # Main message — middle sentences
+        out.append("MAIN MESSAGE  (core value, offer, or story):")
+        if len(sentences) > 5:
+            mid  = sentences[2:-2]
+            step = max(1, len(mid) // 4)
+            picks = mid[::step][:5]
+        elif len(sentences) > 2:
+            picks = sentences[1:-1]
+        else:
+            picks = []
+        out += [f"  • {s}" for s in picks] or ["  [none found]"]
+        out.append("")
+
+        # CTA — last 1-2 sentences
+        out.append("CALL TO ACTION  (what the viewer should do next):")
+        cta = sentences[-2:] if len(sentences) >= 2 else sentences
+        out += [f"  • {s}" for s in cta] or ["  [none found]"]
+        out.append("")
+
+        # Keywords + tags
+        out.append("KEY TOPICS / KEYWORDS:")
+        if keywords:
+            out.append(f"  {', '.join(keywords)}")
+        if tags:
+            out.append("  Tags: #" + "  #".join(str(t) for t in tags[:10]))
+        out.append("")
+
+        # Blank template
+        out += [
+            sep,
+            "YOUR CONTENT TEMPLATE",
+            "(rewrite everything in YOUR own words — do not copy!)",
+            sep, "",
+            "[ HOOK — open with a bang ]",
+            "  ________________________________________________",
+            "",
+            "[ MAIN MESSAGE — your value / product / story ]",
+            "  ________________________________________________",
+            "  ________________________________________________",
+            "",
+            "[ CALL TO ACTION — tell viewers what to do ]",
+            "  ________________________________________________",
+            "",
+            "⚠  This tool provides inspiration only.",
+            "   Always write your content in your own original words.",
+            "   Your creativity + your voice = your copyright.",
+        ]
+
+        return "\n".join(out)
 
 
 def main():
