@@ -1297,8 +1297,9 @@ class PromoExtractorWindow:
 
             self._set_status("Transcribing with Whisper (may take 1–3 minutes)…")
             transcript = self._transcribe(str(audio_path))
+            # Whisper unavailable — continue without transcript (vision API still works)
             if transcript is None:
-                return  # error text already shown
+                transcript = ""
 
             fname = Path(file_path).stem
             self._set_status("Analysing scene structure…")
@@ -1324,6 +1325,8 @@ class PromoExtractorWindow:
                                                          visual_analysis))
             if visual_analysis:
                 self._set_status("Done!  Full AI visual analysis complete — see 'Video Gen Prompt' tab ✓")
+            elif not transcript:
+                self._set_status("Done!  Visual frames analysed — add Anthropic API key for AI fill, or install Whisper for transcript")
             else:
                 self._set_status("Done!  Prompt ready (enter Anthropic API key for auto visual fill)")
 
@@ -1344,14 +1347,15 @@ class PromoExtractorWindow:
             import whisper
         except ImportError:
             self._set_text(self.transcript_text,
-                "Whisper (speech-to-text) is not installed.\n\n"
-                "To transcribe LOCAL video files, install it by running:\n"
+                "Whisper (speech-to-text) is not installed — audio transcript skipped.\n\n"
+                "The AI Visual Analysis and Video Gen Prompt still work fine!\n"
+                "Just make sure you have entered your Anthropic API key in Settings.\n\n"
+                "To also get an audio transcript, install Whisper:\n"
                 "    pip install openai-whisper\n\n"
                 "Tip: for online videos (YouTube, TikTok, Instagram) paste the URL\n"
-                "instead — captions are extracted automatically without Whisper.\n\n"
-                "After installing Whisper, restart the app and try again.")
-            self._set_status("Whisper not installed — see transcript tab for instructions.")
-            return None
+                "instead — captions are extracted automatically without Whisper.")
+            self._set_status("Whisper not installed — continuing with visual analysis only…")
+            return ""
         try:
             self._set_status("Loading Whisper model (base)…")
             model = whisper.load_model("base")
