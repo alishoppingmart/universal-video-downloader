@@ -26,6 +26,7 @@ import zipfile
 import threading
 import subprocess
 import tempfile
+import base64
 import urllib.request
 from pathlib import Path
 
@@ -58,6 +59,32 @@ FFMPEG_DIR = APP_DIR / "ffmpeg"
 FFMPEG_BIN = FFMPEG_DIR / "ffmpeg.exe"
 
 IS_WINDOWS = os.name == "nt"
+
+# Prompt sent to Claude vision when analyzing video frames
+_VISION_PROMPT = """These are key frames sampled from a short social media video (TikTok / Instagram Reel / YouTube Short).
+Analyze ALL frames together and return a structured description so this video can be recreated with an AI video tool.
+
+Reply in this EXACT format — every field must be filled with real, specific details (no blanks):
+
+SETTING: [exact location/environment — e.g. "dense forest trail during heavy rain", "modern minimalist kitchen"]
+SUBJECT: [who or what is the main focus — if a person: gender, age estimate, appearance, clothing — if no person: describe the main subject]
+ACTION: [what is happening on screen — be specific about movement, activity, emotion]
+COLOR PALETTE: [dominant colors and mood — e.g. "muted olive greens and cool greys, desaturated rainy-day tones"]
+LIGHTING: [type and quality — e.g. "overcast flat natural light", "warm golden hour backlight", "neon glow night scene"]
+CAMERA MOVEMENT: [e.g. "slow cinematic push-in", "handheld slightly shaky", "smooth gimbal follow", "static wide tripod"]
+SHOT TYPES: [shot sizes used — e.g. "extreme close-up eyes, medium body shot, wide establishing"]
+TEXT ON SCREEN: [any visible on-screen text, captions, graphics — copy exact wording if readable, else describe style]
+VISUAL EFFECTS: [color grading, filters, slow-motion, film grain, transitions — e.g. "slight desaturation, cinematic 2.35:1 crop, soft vignette"]
+AESTHETIC VIBE: [2-4 words describing the overall look — e.g. "raw moody cinematic", "bright clean minimal", "dark dramatic intense"]
+MUSIC VIBE: [what background music would suit these visuals — e.g. "slow ambient atmospheric build", "upbeat indie pop", "tense dramatic strings"]
+
+Then briefly describe what is visually happening in each frame:
+FRAME 1: [one sentence]
+FRAME 2: [one sentence]
+FRAME 3: [one sentence]
+(add more as needed)
+
+Be highly specific — the description will be used to recreate this video frame by frame."""
 
 
 # --- Portable mode: use tools/cookies that sit NEXT TO the app ---------------
@@ -317,6 +344,15 @@ class DownloaderApp:
         tk.Entry(row5, textvariable=self.cookies_var).pack(side="left", fill="x", expand=True, **pad)
         tk.Button(row5, text="Browse…", command=self._choose_cookies).pack(side="left", **pad)
 
+        row6 = tk.Frame(opt); row6.pack(fill="x")
+        tk.Label(row6, text="🧠 Anthropic API Key:",
+                 anchor="w", fg="#1a3a5c").pack(side="left", **pad)
+        self.vision_api_key_var = tk.StringVar(value="")
+        tk.Entry(row6, textvariable=self.vision_api_key_var, show="*",
+                 width=46).pack(side="left", **pad)
+        tk.Label(row6, text="(for AI visual analysis in Promo Extractor — get free key at console.anthropic.com)",
+                 fg="#666", font=("Segoe UI", 8)).pack(side="left", **pad)
+
         # ---- Action buttons ----
         btns = tk.Frame(self.root); btns.pack(fill="x", padx=10, pady=8)
         self.start_btn = tk.Button(btns, text="▶ Start Download", width=16,
@@ -372,6 +408,7 @@ class DownloaderApp:
             self.browser_cookies_var.set(data.get("browser_cookies", self.browser_cookies_var.get()))
             self.browser_var.set(data.get("browser", self.browser_var.get()))
             self.cookies_var.set(data.get("cookies", self.cookies_var.get()))
+            self.vision_api_key_var.set(data.get("vision_api_key", self.vision_api_key_var.get()))
 
     def _save_settings(self):
         data = {
@@ -388,6 +425,7 @@ class DownloaderApp:
             "browser_cookies": self.browser_cookies_var.get(),
             "browser": self.browser_var.get(),
             "cookies": self.cookies_var.get(),
+            "vision_api_key": self.vision_api_key_var.get(),
         }
         try:
             CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1192,9 +1230,23 @@ class PromoExtractorWindow:
             self._set_status("No content found.")
             return
 
-        # Analyse video visuals if we downloaded it
-        self._set_status("Analysing scenes and building video prompt…")
+        # Analyse video visuals
+        self._set_status("Analysing scene structure…")
         video_info = self._analyze_video(video_path) if video_path else {}
+
+        # AI visual analysis if an API key is configured
+        visual_analysis = None
+        api_key = self.app.vision_api_key_var.get().strip()
+        if api_key and video_path:
+            self._set_status("Extracting video frames for AI visual analysis…")
+            frame_paths = self._extract_frames(video_path, video_info.get("scene_times", []))
+            if frame_paths:
+                self._set_status("Sending frames to Claude AI for visual description…")
+                visual_analysis, err = self._call_vision_api(frame_paths, api_key)
+                if err:
+                    self._set_status(f"Visual analysis: {err}")
+        elif not api_key:
+            self._set_status("Building prompt (add Anthropic API key for full visual analysis)…")
 
         display_transcript = transcript or f"[No spoken transcript — showing description]\n\n{description}"
         self._set_text(self.transcript_text, display_transcript)
@@ -1203,10 +1255,12 @@ class PromoExtractorWindow:
                        self._build_promo_elements(title, transcript or description, tags))
         self._set_text(self.vidgen_text,
                        self._build_video_gen_prompt(title, transcript or description,
-                                                     description, tags, video_info))
-
-        short = (title[:55] + "…") if len(title) > 55 else title
-        self._set_status(f"Done!  Video prompt ready — see 'Video Gen Prompt' tab")
+                                                     description, tags, video_info,
+                                                     visual_analysis))
+        if visual_analysis:
+            self._set_status("Done!  Full AI visual analysis complete — see 'Video Gen Prompt' tab ✓")
+        else:
+            self._set_status("Done!  Prompt ready (enter Anthropic API key for auto visual fill)")
 
     # ---- Local-file path: ffmpeg audio + Whisper transcription -----------
     def _run_file(self, file_path):
@@ -1247,16 +1301,31 @@ class PromoExtractorWindow:
                 return  # error text already shown
 
             fname = Path(file_path).stem
-            self._set_status("Analysing scenes and building video prompt…")
+            self._set_status("Analysing scene structure…")
             video_info = self._analyze_video(file_path)
+
+            visual_analysis = None
+            api_key = self.app.vision_api_key_var.get().strip()
+            if api_key:
+                self._set_status("Extracting video frames for AI visual analysis…")
+                frame_paths = self._extract_frames(file_path, video_info.get("scene_times", []))
+                if frame_paths:
+                    self._set_status("Sending frames to Claude AI for visual description…")
+                    visual_analysis, err = self._call_vision_api(frame_paths, api_key)
+                    if err:
+                        self._set_status(f"Visual analysis: {err}")
 
             self._set_text(self.transcript_text, transcript)
             self._set_text(self.info_text, self._format_info(fname, "", "", []))
             self._set_text(self.promo_text,
                            self._build_promo_elements(fname, transcript, []))
             self._set_text(self.vidgen_text,
-                           self._build_video_gen_prompt(fname, transcript, "", [], video_info))
-            self._set_status(f"Done!  Video prompt ready — see 'Video Gen Prompt' tab")
+                           self._build_video_gen_prompt(fname, transcript, "", [], video_info,
+                                                         visual_analysis))
+            if visual_analysis:
+                self._set_status("Done!  Full AI visual analysis complete — see 'Video Gen Prompt' tab ✓")
+            else:
+                self._set_status("Done!  Prompt ready (enter Anthropic API key for auto visual fill)")
 
         except Exception as exc:
             self._set_text(self.transcript_text, f"Error:\n{exc}")
@@ -1295,6 +1364,103 @@ class PromoExtractorWindow:
                 "Make sure 'openai-whisper' and 'ffmpeg' are properly installed.")
             self._set_status("Transcription error.")
             return None
+
+    # ----------------------------------------- frame extraction + vision AI
+    def _extract_frames(self, video_path, scene_times, max_frames=8):
+        """
+        Extract one JPEG frame per scene (or at regular intervals as fallback).
+        Returns list of file paths to the extracted frames.
+        """
+        if not video_path or not Path(video_path).exists():
+            return []
+
+        ffmpeg_cmd = ("ffmpeg" if not (isinstance(self.app.ffmpeg_bin, Path)
+                                       and self.app.ffmpeg_bin.exists())
+                      else str(self.app.ffmpeg_bin))
+
+        frames_dir = self._temp_dir / "frames"
+        frames_dir.mkdir(exist_ok=True)
+        frame_paths = []
+
+        if scene_times:
+            # One frame per detected scene, 0.3s after the cut to avoid blur
+            for i, t in enumerate(scene_times[:max_frames]):
+                out = str(frames_dir / f"frame_{i:03d}.jpg")
+                subprocess.run(
+                    [ffmpeg_cmd, "-y", "-ss", str(max(0.0, t + 0.3)),
+                     "-i", video_path, "-vframes", "1", "-q:v", "3", out],
+                    capture_output=True, timeout=20,
+                    creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+                if Path(out).exists():
+                    frame_paths.append(out)
+
+        if not frame_paths:
+            # Fallback: one frame every 2 seconds
+            subprocess.run(
+                [ffmpeg_cmd, "-y", "-i", video_path,
+                 "-vf", "fps=0.5", "-vframes", str(max_frames),
+                 "-q:v", "3", str(frames_dir / "frame_%03d.jpg")],
+                capture_output=True, timeout=60,
+                creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+            frame_paths = sorted(str(p) for p in frames_dir.glob("*.jpg"))[:max_frames]
+
+        return [p for p in frame_paths if Path(p).exists()]
+
+    def _call_vision_api(self, frame_paths, api_key):
+        """
+        Send video frames to Claude vision (claude-haiku) via raw HTTP.
+        Returns (analysis_text, error_string).  error_string is None on success.
+        No third-party packages needed — uses stdlib urllib only.
+        """
+        # Build the content array: images first, then the instruction prompt
+        content = []
+        for fp in frame_paths[:8]:
+            try:
+                with open(fp, "rb") as f:
+                    b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64",
+                               "media_type": "image/jpeg",
+                               "data": b64}
+                })
+            except Exception:
+                continue
+
+        if not content:
+            return None, "No frames could be read"
+
+        content.append({"type": "text", "text": _VISION_PROMPT})
+
+        payload = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": content}]
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result["content"][0]["text"], None
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code in (401, 403):
+                return None, "Invalid API key — get yours at console.anthropic.com"
+            if e.code == 429:
+                return None, "API rate limit hit — wait a moment and try again"
+            return None, f"API error {e.code}: {body[:120]}"
+        except Exception as exc:
+            return None, f"Request failed: {exc}"
 
     # ------------------------------------------------- video visual analysis
     def _analyze_video(self, video_path):
@@ -1388,9 +1554,12 @@ class PromoExtractorWindow:
 
     # ------------------------------------------- video generation prompt
     @staticmethod
-    def _build_video_gen_prompt(title, transcript, description, tags, video_info):
+    def _build_video_gen_prompt(title, transcript, description, tags, video_info,
+                                 visual_analysis=None):
         """
         Build a structured scene-by-scene AI video generation prompt.
+        When visual_analysis (from Claude vision) is provided, every field is
+        filled automatically. Otherwise blank placeholders are shown.
         Covers every field needed by Sora, Runway Gen-4, Kling, Pika, Hailuo.
         """
         duration     = video_info.get("duration", 30.0)
@@ -1472,85 +1641,115 @@ class PromoExtractorWindow:
         if tags_str:
             out += [f"KEYWORDS:  #{tags_str}", ""]
 
-        # Visual style — user fills these in by watching the original video
+        # ---- Parse visual analysis from Claude vision (if available) ----
+        def _vf(field, fallback="[not detected]"):
+            """Extract a named field from Claude's structured visual analysis."""
+            if not visual_analysis:
+                return fallback
+            m = re.search(rf"^{re.escape(field)}:\s*(.+)$",
+                          visual_analysis, re.MULTILINE | re.IGNORECASE)
+            return m.group(1).strip() if m else fallback
+
+        def _frame_desc(i):
+            """Extract per-frame description from Claude's analysis."""
+            if not visual_analysis:
+                return "[Describe exactly what you see — person, action, setting]"
+            m = re.search(rf"^FRAME {i}:\s*(.+)$",
+                          visual_analysis, re.MULTILINE | re.IGNORECASE)
+            return m.group(1).strip() if m else _vf("ACTION")
+
+        blank = "________________________________"
+
+        if visual_analysis:
+            style_header = "VISUAL STYLE  (auto-filled by Claude AI ✓)"
+            style_note   = "  ← Verified by AI frame analysis — refine if needed"
+        else:
+            style_header = "VISUAL STYLE  ← Add Anthropic API key for auto-fill"
+            style_note   = "  ← Watch the original video and fill in each line"
+
         out += [
             dash,
-            "VISUAL STYLE  ← Watch the original video and fill in each line",
+            style_header,
+            style_note,
             dash,
-            "  Setting / Location:     ________________________________",
-            "  Background:             ________________________________",
-            "  Subject / Person:       ________________________________",
-            "     (appearance, clothing, gender, age)",
-            "  Color palette:          ________________________________",
-            "     (e.g. bright & warm  /  dark & moody  /  clean white)",
-            "  Lighting:               ________________________________",
-            "     (e.g. natural daylight  /  studio softbox  /  neon)",
-            "  Camera movement:        ________________________________",
-            "     (e.g. static  /  slow zoom in  /  handheld  /  drone)",
-            "  Text overlay style:     ________________________________",
-            "     (e.g. bold white captions  /  animated subtitles)",
-            "  Visual effects / B-roll: _______________________________",
-            "  Background music style: ________________________________",
-            "     (e.g. upbeat pop  /  calm lo-fi  /  dramatic strings)",
-            "  Voiceover tone:         ________________________________",
-            "     (e.g. energetic  /  calm & professional  /  friendly)",
+            f"  Setting / Location:      {_vf('SETTING', blank)}",
+            f"  Subject / Person:        {_vf('SUBJECT', blank)}",
+            f"  Action on screen:        {_vf('ACTION', blank)}",
+            f"  Color palette:           {_vf('COLOR PALETTE', blank)}",
+            f"  Lighting:                {_vf('LIGHTING', blank)}",
+            f"  Camera movement:         {_vf('CAMERA MOVEMENT', blank)}",
+            f"  Shot types:              {_vf('SHOT TYPES', blank)}",
+            f"  Text / captions shown:   {_vf('TEXT ON SCREEN', blank)}",
+            f"  Visual effects / grade:  {_vf('VISUAL EFFECTS', blank)}",
+            f"  Aesthetic vibe:          {_vf('AESTHETIC VIBE', blank)}",
+            f"  Background music style:  {_vf('MUSIC VIBE', blank)}",
             "",
         ]
 
-        # Scene breakdown — the core of the prompt
+        # Scene breakdown with per-frame descriptions
         out += [dash, "SCENE-BY-SCENE BREAKDOWN", dash, ""]
         for i, (role, time_label, script) in enumerate(
                 zip(roles, time_labels, scene_scripts), 1):
+            on_screen = _frame_desc(i)
+            text_shown = _vf("TEXT ON SCREEN",
+                             "[Any text/caption on screen — copy exactly]")
             out += [
                 f"┌─ SCENE {i}  [{time_label}]  —  {role}",
                 f"│  Voiceover : \"{script}\"",
-                f"│  On screen : [Describe exactly what you see — person, action, setting]",
-                f"│  Text shown: [Any text/caption displayed on screen — copy it exactly]",
+                f"│  On screen : {on_screen}",
+                f"│  Text shown: {text_shown}",
                 f"│  Transition: [Cut  /  Fade  /  Zoom  /  Slide]",
                 f"└{'─'*54}", "",
             ]
 
         # Complete script
         out += [dash, "COMPLETE VOICEOVER SCRIPT  (rewrite in YOUR own words)", dash]
-        if transcript:
-            out.append(transcript)
-        else:
-            out.append("[No transcript extracted — write your own script here]")
+        out.append(transcript if transcript
+                   else "[No transcript extracted — write your own script here]")
         out.append("")
 
-        # Short one-liner for tools that take a single prompt box
-        script_preview = (transcript[:200] + "…") if transcript and len(transcript) > 200 else (transcript or "[YOUR SCRIPT]")
+        # One-liner for single-input-box tools
+        vis_style = (
+            f"{_vf('AESTHETIC VIBE', '')} aesthetic, "
+            f"{_vf('COLOR PALETTE', '')} color palette, "
+            f"{_vf('LIGHTING', '')} lighting, "
+            f"{_vf('CAMERA MOVEMENT', '')} camera"
+            if visual_analysis else "[ADD VISUAL STYLE FROM SECTION ABOVE]"
+        )
+        script_preview = ((transcript[:200] + "…") if transcript and len(transcript) > 200
+                          else (transcript or "[YOUR SCRIPT]"))
         one_liner = (
             f"Create a {duration:.0f}-second {aspect_ratio} video. "
             f"Topic: {topic}. "
-            f"{num_scenes} scenes with {pacing}. "
-            f"Voiceover script: \"{script_preview}\" "
-            f"Visual style: [FILL IN FROM VISUAL STYLE SECTION ABOVE]. "
-            f"Background music: [FILL IN]."
+            f"Setting: {_vf('SETTING', '[location]')}. "
+            f"Subject: {_vf('SUBJECT', '[describe subject]')}. "
+            f"{num_scenes} scenes, {pacing}. "
+            f"Visual style: {vis_style}. "
+            f"Background music: {_vf('MUSIC VIBE', '[music style]')}. "
+            f"Voiceover: \"{script_preview}\""
         )
+
         out += [
             sep,
-            "ONE-LINE PROMPT  (for tools with a single input box)",
+            "ONE-LINE PROMPT  (paste into Kling / Hailuo / Sora single-box tools)",
             sep,
             one_liner,
             "",
             dash,
-            "HOW TO USE THIS PROMPT",
+            "HOW TO USE",
             dash,
-            "  STEP 1 — Watch the original video and fill in every [bracket] in",
-            "           the VISUAL STYLE section above. That's the key missing piece.",
-            "  STEP 2 — Rewrite the Voiceover Script in YOUR OWN words.",
-            "           Same message, different wording = your copyright.",
-            "  STEP 3 — For scene-based tools (Runway, Pika multi-scene):",
-            "           copy each SCENE block separately.",
-            "  STEP 4 — For single-prompt tools (Kling, Hailuo, Sora):",
-            "           use the ONE-LINE PROMPT at the bottom.",
-            "  STEP 5 — Generate, review, adjust scene descriptions until it matches.",
+            "  1. Copy the ONE-LINE PROMPT above → paste into your video AI tool.",
+            "  2. For multi-scene tools (Runway, Pika): paste each SCENE block.",
+            "  3. Rewrite the Voiceover in your own words before publishing.",
+            "  4. Refine any visual field that doesn't match — AI analysis is a",
+            "     good starting point but you know the video best.",
             "",
-            "⚠  The voiceover script is extracted from the ORIGINAL video.",
-            "   You MUST rewrite it in your own words before publishing.",
-            "   Visual descriptions you add yourself are 100% your original work.",
+            "⚠  The voiceover is from the ORIGINAL video.",
+            "   Rewrite it in your own words = your copyright.",
         ]
+        if visual_analysis:
+            out += ["", "─── Raw AI Visual Analysis (for reference) ───",
+                    visual_analysis]
 
         return "\n".join(out)
 
