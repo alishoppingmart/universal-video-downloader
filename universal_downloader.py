@@ -831,16 +831,17 @@ class DownloaderApp:
 # ----------------------------------------------------------------------------
 class PromoExtractorWindow:
     """
-    Extracts the promotional script from any video — either a public URL
-    (TikTok, YouTube, Instagram, Facebook) or a local video file.
+    Extracts a full AI video generation prompt from any video URL or local file.
 
-    URL path  : yt-dlp fetches auto-captions / subtitles + metadata.
-    Local path: ffmpeg extracts audio, then openai-whisper transcribes it.
+    URL path  : yt-dlp fetches captions/metadata, then downloads the video for
+                scene analysis (duration, cuts, aspect ratio, pacing).
+    Local path: ffmpeg extracts audio → Whisper transcribes; same scene analysis.
 
-    Results are split into three tabs:
-      1. Full Transcript / Script
-      2. Promo Elements (Hook · Key Points · CTA · Template)
-      3. Video Info (title, description, tags)
+    Results are split into four tabs:
+      1. Video Gen Prompt  — scene-by-scene prompt ready for Sora/Runway/Kling/Pika
+      2. Full Transcript   — complete spoken script
+      3. Promo Elements    — Hook / Key Points / CTA + blank template
+      4. Video Info        — title, description, tags
     """
 
     def __init__(self, master, app):
@@ -934,6 +935,9 @@ class PromoExtractorWindow:
                      font=("Segoe UI", 9)).pack(side="left", padx=8)
             return txt
 
+        self.vidgen_text = _make_tab(
+            "Video Gen Prompt  ★",
+            "Scene-by-scene prompt — paste directly into Sora / Runway / Kling / Pika / Hailuo")
         self.transcript_text = _make_tab(
             "Full Transcript / Script",
             "Complete spoken content extracted from the video")
@@ -963,7 +967,7 @@ class PromoExtractorWindow:
             messagebox.showinfo("Copied", "Content copied to clipboard.", parent=self.win)
 
     def _clear(self):
-        for w in (self.transcript_text, self.promo_text, self.info_text):
+        for w in (self.vidgen_text, self.transcript_text, self.promo_text, self.info_text):
             w.delete("1.0", "end")
         self.status_var.set("Ready — paste a URL or select a file above")
 
@@ -1036,13 +1040,12 @@ class PromoExtractorWindow:
         else:
             threading.Thread(target=self._run_file, args=(local,), daemon=True).start()
 
-    # ---- URL path: yt-dlp captions + metadata ----------------------------
+    # ---- URL path: yt-dlp captions + metadata + video download for analysis --
     def _run_url(self, url):
         try:
             self._temp_dir = Path(tempfile.mkdtemp(prefix="promo_"))
-            self._set_status("Fetching captions and metadata from URL…")
+            self._set_status("Step 1/2 — Fetching captions and metadata…")
 
-            # Resolve yt-dlp binary (prefer app's own copy)
             ytdlp_bin = self.app.ytdlp_bin
             if isinstance(ytdlp_bin, Path) and not ytdlp_bin.exists():
                 ytdlp_bin = "yt-dlp"
@@ -1050,38 +1053,37 @@ class PromoExtractorWindow:
 
             lang = self.lang_var.get()
 
-            cmd = [ytdlp_cmd,
-                   "--skip-download",
-                   "--write-auto-subs",
-                   "--write-subs",
-                   "--convert-subs", "srt",
-                   "--write-description",
-                   "--write-info-json",
-                   "--no-warnings",
-                   "--ignore-errors",
-                   "-o", str(self._temp_dir / "%(id)s.%(ext)s"),
-                   url]
+            def _auth_flags():
+                flags = []
+                if IS_WINDOWS and self.app.ffmpeg_bin and self.app.ffmpeg_bin.exists():
+                    flags += ["--ffmpeg-location", str(self.app.ffmpeg_dir)]
+                if self.app.impersonate_var.get():
+                    flags += ["--impersonate", "chrome"]
+                if self.app.cookies_var.get().strip():
+                    flags += ["--cookies", self.app.cookies_var.get().strip()]
+                elif self.app.browser_cookies_var.get():
+                    flags += ["--cookies-from-browser", self.app.browser_var.get()]
+                return flags
 
+            # --- 1) Grab captions + metadata (no download) ---
+            meta_cmd = [ytdlp_cmd,
+                        "--skip-download",
+                        "--write-auto-subs", "--write-subs",
+                        "--convert-subs", "srt",
+                        "--write-description", "--write-info-json",
+                        "--no-warnings", "--ignore-errors",
+                        "-o", str(self._temp_dir / "%(id)s.%(ext)s"),
+                        url]
             if lang != "auto":
-                cmd += ["--sub-lang", lang]
-
-            # Reuse auth / ffmpeg settings from the main downloader window
-            if IS_WINDOWS and self.app.ffmpeg_bin and self.app.ffmpeg_bin.exists():
-                cmd += ["--ffmpeg-location", str(self.app.ffmpeg_dir)]
-            if self.app.impersonate_var.get():
-                cmd += ["--impersonate", "chrome"]
-            if self.app.cookies_var.get().strip():
-                cmd += ["--cookies", self.app.cookies_var.get().strip()]
-            elif self.app.browser_cookies_var.get():
-                cmd += ["--cookies-from-browser", self.app.browser_var.get()]
+                meta_cmd += ["--sub-lang", lang]
+            meta_cmd += _auth_flags()
 
             self._subproc = subprocess.Popen(
-                cmd,
+                meta_cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 text=True, encoding="utf-8", errors="replace",
                 creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
-
             log_lines = []
             for line in self._subproc.stdout:
                 log_lines.append(line.rstrip())
@@ -1094,7 +1096,39 @@ class PromoExtractorWindow:
                 self._set_status("Stopped.")
                 return
 
-            self._parse_url_output(url, log_lines)
+            # --- 2) Download the video (lowest quality) for visual analysis ---
+            self._set_status("Step 2/2 — Downloading video for scene analysis…")
+            vid_out = str(self._temp_dir / "video.%(ext)s")
+            dl_cmd = [ytdlp_cmd,
+                      "--no-playlist",
+                      "-f", "worstvideo[ext=mp4]+worstaudio/worst[ext=mp4]/worst",
+                      "--no-warnings", "--ignore-errors",
+                      "-o", vid_out, url]
+            dl_cmd += _auth_flags()
+
+            self._subproc = subprocess.Popen(
+                dl_cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+            for line in self._subproc.stdout:
+                if self.stop_event.is_set():
+                    self._subproc.kill()
+                    break
+            self._subproc.wait()
+
+            if self.stop_event.is_set():
+                self._set_status("Stopped.")
+                return
+
+            # Find the downloaded video file
+            video_files = [f for f in self._temp_dir.iterdir()
+                           if f.name.startswith("video.") and f.suffix in
+                           (".mp4", ".mkv", ".webm", ".avi", ".mov")]
+            video_path = str(video_files[0]) if video_files else None
+
+            self._parse_url_output(url, log_lines, video_path)
 
         except Exception as exc:
             self._set_text(self.transcript_text, f"Error:\n{exc}")
@@ -1107,7 +1141,7 @@ class PromoExtractorWindow:
                 pass
             self._finish()
 
-    def _parse_url_output(self, url, log_lines):
+    def _parse_url_output(self, url, log_lines, video_path=None):
         temp_dir = self._temp_dir
         lang     = self.lang_var.get()
 
@@ -1121,11 +1155,11 @@ class PromoExtractorWindow:
 
         if info_files:
             try:
-                info     = json.loads(info_files[0].read_text(encoding="utf-8"))
-                title    = info.get("title", "")
-                uploader = info.get("uploader") or info.get("channel", "")
+                info        = json.loads(info_files[0].read_text(encoding="utf-8"))
+                title       = info.get("title", "")
+                uploader    = info.get("uploader") or info.get("channel", "")
                 description = info.get("description", "")
-                tags     = info.get("tags") or []
+                tags        = info.get("tags") or []
             except Exception:
                 pass
 
@@ -1158,14 +1192,21 @@ class PromoExtractorWindow:
             self._set_status("No content found.")
             return
 
+        # Analyse video visuals if we downloaded it
+        self._set_status("Analysing scenes and building video prompt…")
+        video_info = self._analyze_video(video_path) if video_path else {}
+
         display_transcript = transcript or f"[No spoken transcript — showing description]\n\n{description}"
         self._set_text(self.transcript_text, display_transcript)
         self._set_text(self.info_text, self._format_info(title, uploader, description, tags))
         self._set_text(self.promo_text,
                        self._build_promo_elements(title, transcript or description, tags))
+        self._set_text(self.vidgen_text,
+                       self._build_video_gen_prompt(title, transcript or description,
+                                                     description, tags, video_info))
 
         short = (title[:55] + "…") if len(title) > 55 else title
-        self._set_status(f"Done!  Extracted from: {short or url}")
+        self._set_status(f"Done!  Video prompt ready — see 'Video Gen Prompt' tab")
 
     # ---- Local-file path: ffmpeg audio + Whisper transcription -----------
     def _run_file(self, file_path):
@@ -1206,11 +1247,16 @@ class PromoExtractorWindow:
                 return  # error text already shown
 
             fname = Path(file_path).stem
+            self._set_status("Analysing scenes and building video prompt…")
+            video_info = self._analyze_video(file_path)
+
             self._set_text(self.transcript_text, transcript)
             self._set_text(self.info_text, self._format_info(fname, "", "", []))
             self._set_text(self.promo_text,
                            self._build_promo_elements(fname, transcript, []))
-            self._set_status(f"Done!  Transcript from: {Path(file_path).name}")
+            self._set_text(self.vidgen_text,
+                           self._build_video_gen_prompt(fname, transcript, "", [], video_info))
+            self._set_status(f"Done!  Video prompt ready — see 'Video Gen Prompt' tab")
 
         except Exception as exc:
             self._set_text(self.transcript_text, f"Error:\n{exc}")
@@ -1249,6 +1295,264 @@ class PromoExtractorWindow:
                 "Make sure 'openai-whisper' and 'ffmpeg' are properly installed.")
             self._set_status("Transcription error.")
             return None
+
+    # ------------------------------------------------- video visual analysis
+    def _analyze_video(self, video_path):
+        """
+        Use ffprobe + ffmpeg to extract duration, dimensions, scene change
+        timestamps, and pacing from a video file.
+        Returns a dict consumed by _build_video_gen_prompt.
+        """
+        result = {
+            "duration": 30.0, "width": 1080, "height": 1920,
+            "aspect_ratio": "9:16", "scene_times": [], "num_scenes": 4,
+            "avg_scene_len": 7.5, "pacing": "medium (6–12s per scene)",
+        }
+        if not video_path or not Path(video_path).exists():
+            return result
+
+        ffmpeg_dir  = (self.app.ffmpeg_bin.parent
+                       if isinstance(self.app.ffmpeg_bin, Path) and self.app.ffmpeg_bin.exists()
+                       else None)
+        ffprobe_cmd = str(ffmpeg_dir / ("ffprobe.exe" if IS_WINDOWS else "ffprobe")) \
+                      if ffmpeg_dir else "ffprobe"
+        ffmpeg_cmd  = str(self.app.ffmpeg_bin) \
+                      if isinstance(self.app.ffmpeg_bin, Path) and self.app.ffmpeg_bin.exists() \
+                      else "ffmpeg"
+
+        # --- duration + dimensions via ffprobe ---
+        try:
+            probe = subprocess.run(
+                [ffprobe_cmd, "-v", "quiet", "-of", "json",
+                 "-show_streams", "-show_format", video_path],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+            if probe.returncode == 0:
+                info = json.loads(probe.stdout)
+                fmt_dur = info.get("format", {}).get("duration")
+                if fmt_dur:
+                    result["duration"] = float(fmt_dur)
+                for s in info.get("streams", []):
+                    if s.get("codec_type") == "video":
+                        w = int(s.get("width", 1080))
+                        h = int(s.get("height", 1920))
+                        result["width"], result["height"] = w, h
+                        if h > w * 1.2:
+                            result["aspect_ratio"] = "9:16"
+                        elif w > h * 1.5:
+                            result["aspect_ratio"] = "16:9"
+                        else:
+                            result["aspect_ratio"] = "1:1"
+                        break
+        except Exception:
+            pass
+
+        # --- scene change detection via ffmpeg showinfo ---
+        try:
+            sc = subprocess.run(
+                [ffmpeg_cmd, "-i", video_path,
+                 "-filter:v", "select='gt(scene,0.35)',showinfo",
+                 "-vsync", "vfr", "-an", "-f", "null", "-"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=120, creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0)
+            times = [0.0]
+            for line in (sc.stdout + sc.stderr).splitlines():
+                m = re.search(r"pts_time:([\d.]+)", line)
+                if m:
+                    t = float(m.group(1))
+                    if t > 0.5 and (not times or t - times[-1] > 0.5):
+                        times.append(round(t, 2))
+            if len(times) > 1:
+                result["scene_times"] = times
+                result["num_scenes"]  = len(times)
+                diffs = [times[i+1] - times[i] for i in range(len(times)-1)]
+                avg   = sum(diffs) / len(diffs)
+                result["avg_scene_len"] = round(avg, 1)
+                if avg < 3:
+                    result["pacing"] = "very fast (< 3s per scene)"
+                elif avg < 6:
+                    result["pacing"] = "fast (3–6s per scene)"
+                elif avg < 12:
+                    result["pacing"] = "medium (6–12s per scene)"
+                else:
+                    result["pacing"] = "slow (> 12s per scene)"
+            else:
+                # Fallback: estimate 4 even scenes
+                dur = result["duration"]
+                result["scene_times"] = [round(dur * i / 4, 1) for i in range(4)]
+                result["num_scenes"]  = 4
+        except Exception:
+            pass
+
+        return result
+
+    # ------------------------------------------- video generation prompt
+    @staticmethod
+    def _build_video_gen_prompt(title, transcript, description, tags, video_info):
+        """
+        Build a structured scene-by-scene AI video generation prompt.
+        Covers every field needed by Sora, Runway Gen-4, Kling, Pika, Hailuo.
+        """
+        duration     = video_info.get("duration", 30.0)
+        num_scenes   = max(2, video_info.get("num_scenes", 4))
+        scene_times  = video_info.get("scene_times", [])
+        pacing       = video_info.get("pacing", "medium")
+        aspect_ratio = video_info.get("aspect_ratio", "9:16")
+        width        = video_info.get("width", 1080)
+        height       = video_info.get("height", 1920)
+
+        fmt_labels = {
+            "9:16": f"Vertical  {width}×{height}  (TikTok / Reels / Shorts)",
+            "16:9": f"Horizontal  {width}×{height}  (YouTube / Facebook)",
+            "1:1":  f"Square  {width}×{height}  (Instagram Feed)",
+        }
+        fmt_label = fmt_labels.get(aspect_ratio, f"{width}×{height}")
+
+        # Split transcript into sentences and distribute across scenes
+        sentences = []
+        if transcript:
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", transcript)
+                         if s.strip() and len(s.strip()) > 5]
+
+        def _chunk(lst, n):
+            """Split list into n roughly equal parts."""
+            k, rem = divmod(len(lst), n)
+            chunks, pos = [], 0
+            for i in range(n):
+                size = k + (1 if i < rem else 0)
+                chunks.append(" ".join(lst[pos:pos+size]) or "[No script content]")
+                pos += size
+            return chunks
+
+        scene_scripts = _chunk(sentences, num_scenes) if sentences else ["[VOICEOVER]"] * num_scenes
+
+        # Build scene time labels
+        if len(scene_times) >= num_scenes:
+            st = scene_times[:num_scenes]
+            time_labels = [f"{st[i]:.0f}s – {(st[i+1] if i+1 < len(st) else duration):.0f}s"
+                           for i in range(num_scenes)]
+        else:
+            seg = duration / num_scenes
+            time_labels = [f"{i*seg:.0f}s – {(i+1)*seg:.0f}s" for i in range(num_scenes)]
+
+        # Scene role labels
+        roles = ["MAIN CONTENT"] * num_scenes
+        roles[0] = "HOOK"
+        if num_scenes > 1:
+            roles[-1] = "CALL TO ACTION"
+        if num_scenes > 2:
+            roles[1] = "PROBLEM / PAIN POINT"
+        if num_scenes > 3:
+            roles[2] = "SOLUTION / BENEFIT"
+        if num_scenes > 4:
+            for i in range(3, num_scenes - 1):
+                roles[i] = "PROOF / DETAILS"
+
+        topic = title or (description[:80] + "…" if description and len(description) > 80 else description) or "your topic"
+        tags_str = "  #".join(str(t) for t in tags[:8]) if tags else ""
+
+        sep  = "═" * 56
+        dash = "─" * 56
+        out  = []
+
+        out += [
+            sep,
+            "  AI VIDEO GENERATION PROMPT",
+            "  Ready for: Sora · Runway · Kling · Pika · Hailuo · InVideo",
+            sep, "",
+            f"TOPIC / CONCEPT:   {topic}",
+            "",
+            f"FORMAT:    {aspect_ratio}  ·  {fmt_label}",
+            f"DURATION:  ~{duration:.0f} seconds",
+            f"SCENES:    {num_scenes}",
+            f"PACING:    {pacing}",
+            "",
+        ]
+
+        if tags_str:
+            out += [f"KEYWORDS:  #{tags_str}", ""]
+
+        # Visual style — user fills these in by watching the original video
+        out += [
+            dash,
+            "VISUAL STYLE  ← Watch the original video and fill in each line",
+            dash,
+            "  Setting / Location:     ________________________________",
+            "  Background:             ________________________________",
+            "  Subject / Person:       ________________________________",
+            "     (appearance, clothing, gender, age)",
+            "  Color palette:          ________________________________",
+            "     (e.g. bright & warm  /  dark & moody  /  clean white)",
+            "  Lighting:               ________________________________",
+            "     (e.g. natural daylight  /  studio softbox  /  neon)",
+            "  Camera movement:        ________________________________",
+            "     (e.g. static  /  slow zoom in  /  handheld  /  drone)",
+            "  Text overlay style:     ________________________________",
+            "     (e.g. bold white captions  /  animated subtitles)",
+            "  Visual effects / B-roll: _______________________________",
+            "  Background music style: ________________________________",
+            "     (e.g. upbeat pop  /  calm lo-fi  /  dramatic strings)",
+            "  Voiceover tone:         ________________________________",
+            "     (e.g. energetic  /  calm & professional  /  friendly)",
+            "",
+        ]
+
+        # Scene breakdown — the core of the prompt
+        out += [dash, "SCENE-BY-SCENE BREAKDOWN", dash, ""]
+        for i, (role, time_label, script) in enumerate(
+                zip(roles, time_labels, scene_scripts), 1):
+            out += [
+                f"┌─ SCENE {i}  [{time_label}]  —  {role}",
+                f"│  Voiceover : \"{script}\"",
+                f"│  On screen : [Describe exactly what you see — person, action, setting]",
+                f"│  Text shown: [Any text/caption displayed on screen — copy it exactly]",
+                f"│  Transition: [Cut  /  Fade  /  Zoom  /  Slide]",
+                f"└{'─'*54}", "",
+            ]
+
+        # Complete script
+        out += [dash, "COMPLETE VOICEOVER SCRIPT  (rewrite in YOUR own words)", dash]
+        if transcript:
+            out.append(transcript)
+        else:
+            out.append("[No transcript extracted — write your own script here]")
+        out.append("")
+
+        # Short one-liner for tools that take a single prompt box
+        script_preview = (transcript[:200] + "…") if transcript and len(transcript) > 200 else (transcript or "[YOUR SCRIPT]")
+        one_liner = (
+            f"Create a {duration:.0f}-second {aspect_ratio} video. "
+            f"Topic: {topic}. "
+            f"{num_scenes} scenes with {pacing}. "
+            f"Voiceover script: \"{script_preview}\" "
+            f"Visual style: [FILL IN FROM VISUAL STYLE SECTION ABOVE]. "
+            f"Background music: [FILL IN]."
+        )
+        out += [
+            sep,
+            "ONE-LINE PROMPT  (for tools with a single input box)",
+            sep,
+            one_liner,
+            "",
+            dash,
+            "HOW TO USE THIS PROMPT",
+            dash,
+            "  STEP 1 — Watch the original video and fill in every [bracket] in",
+            "           the VISUAL STYLE section above. That's the key missing piece.",
+            "  STEP 2 — Rewrite the Voiceover Script in YOUR OWN words.",
+            "           Same message, different wording = your copyright.",
+            "  STEP 3 — For scene-based tools (Runway, Pika multi-scene):",
+            "           copy each SCENE block separately.",
+            "  STEP 4 — For single-prompt tools (Kling, Hailuo, Sora):",
+            "           use the ONE-LINE PROMPT at the bottom.",
+            "  STEP 5 — Generate, review, adjust scene descriptions until it matches.",
+            "",
+            "⚠  The voiceover script is extracted from the ORIGINAL video.",
+            "   You MUST rewrite it in your own words before publishing.",
+            "   Visual descriptions you add yourself are 100% your original work.",
+        ]
+
+        return "\n".join(out)
 
     # ----------------------------------------------------------- parsers
     @staticmethod
